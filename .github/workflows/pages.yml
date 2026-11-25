@@ -1,0 +1,98 @@
+name: Qualify and deploy the WASM64 demo
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed 40-character commit from DataLab-Platform/web
+        required: true
+      mode:
+        description: Preview publishes without a >4 GiB claim; qualified requires a reviewed receipt
+        type: choice
+        required: true
+        options:
+          - check
+          - preview
+          - qualified
+permissions: {}
+concurrency:
+  group: wasm64-pages
+  cancel-in-progress: false
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require an immutable source revision
+        env:
+          SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SHA" =~ ^[a-f0-9]{40}$ ]]'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: deployment
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: DataLab-Platform/web
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22.23.4'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: |
+          cd source
+          npm ci
+          npm ci --prefix tools/wasm64 --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install -r tools/wasm64/requirements-maintenance.txt 'sigima==1.4.1' 'guidata==3.17.3' 'datalab-capsule==0.2.0'
+          .venv/bin/python tools/wasm64/build.py --allow-kiwi-metadata
+          .venv/bin/python -I tests/wasm64/native_workspace.py generate build/wasm64/fixtures/source.h5
+          npm run wasm64:build
+          npx playwright install --with-deps chromium
+          npm run wasm64:test:a
+          DLW_TEST_ENGINE=pyodide npm run wasm64:test:a
+          node tools/wasm64/app-build.mjs --benchmark
+          npx playwright test --config tests/wasm64/benchmark/reference.config.ts
+      - name: Check the reviewed qualification receipt before promotion
+        env:
+          SOURCE: ${{ inputs.source_sha }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          cd source
+          public=$(node tools/wasm64/site-digest.mjs build/wasm64/demo)
+          private=$(node tools/wasm64/site-digest.mjs build/wasm64/benchmark)
+          echo "Public: $public; benchmark: $private; source: $SOURCE" >> "$GITHUB_STEP_SUMMARY"
+          case "$MODE" in
+            check) ;;
+            preview) echo "Experimental preview only: >4 GiB qualification not demonstrated." >> "$GITHUB_STEP_SUMMARY" ;;
+            qualified) node ../deployment/verify-qualification.mjs "../deployment/qualification/$SOURCE" "$SOURCE" "$public" "$private" ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        if: inputs.mode == 'preview' || inputs.mode == 'qualified'
+        with:
+          path: source/build/wasm64/demo
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: inputs.mode == 'check'
+        with:
+          name: qualification-builds
+          path: |
+            source/build/wasm64/demo
+            source/build/wasm64/benchmark
+  deploy:
+    if: (inputs.mode == 'preview' || inputs.mode == 'qualified') && github.ref == 'refs/heads/main'
+    needs: qualify
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

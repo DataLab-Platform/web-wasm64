@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const [directory, source, publicTree, benchmarkTree] = process.argv.slice(2);
+assert.match(source, /^[a-f0-9]{40}$/);
+for (const hash of [publicTree, benchmarkTree]) assert.match(hash, /^[a-f0-9]{64}$/);
+const json = (name) => JSON.parse(readFileSync(join(directory, name), "utf8"));
+const approval = json("approval.json");
+assert.equal(approval.source, source);
+assert.equal(approval.publicTree, publicTree);
+assert.equal(approval.benchmarkTree, benchmarkTree);
+assert.equal(approval.manualReview, "approved");
+const raw = readFileSync(join(directory, "report.json"));
+assert.equal(approval.reportSha256, createHash("sha256").update(raw).digest("hex"));
+const r = JSON.parse(raw);
+assert.equal(r.tier, "18432");
+assert.equal(r.passed, true);
+assert.equal(r.siteSha256, benchmarkTree);
+assert.deepEqual(r.blockedRequests, []);
+assert.ok(r.maxObservedRendererWorkingSet > 0);
+assert.equal(r.checked.dataBytes, 5435817984);
+assert.ok(r.checked.heapBytes > 2 ** 32);
+const o = r.checked.oracle;
+assert.equal(o.operation, "sigima.image.addition");
+assert.deepEqual(o.mismatches, [0, 0, 0]);
+assert.deepEqual(o.extrema, [0, 147448]);
+assert.ok(o.probes.some((p) => p.addresses.some((address) => BigInt(address) >= 2n ** 32n)));
+const [start, end] = o.timings.compute;
+assert.ok(r.uiTickDuringCompute > start && r.uiTickDuringCompute < end);
+assert.deepEqual(r.interactions, [1, 2, 1].map((count) =>
+  ["python", "worker"].map((boundary) => ({boundary, max:count*1048576, sum:count*1048576}))));
